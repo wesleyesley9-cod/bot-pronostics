@@ -19,7 +19,7 @@ API_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": FOOTBALL_TOKEN}
 LIGUE_MOYENNE = 1.4
 CHAT_ID_FILE = "chat_id.txt"
-HEURE_ENVOI = datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
+HEURE_ENVOI = datetime.time(hour=10, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
 
 COMPETITIONS = ["PL", "BL1", "SA", "PD", "FL1", "CL", "DED", "PPL", "ELC", "BSA", "WC", "EC"]
 EQUIPES = {}
@@ -229,7 +229,7 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id, f"🌞 Bonjour ! Pronostics du jour ({len(matchs)} match{'s' if len(matchs) > 1 else ''}) :"
     )
-    for m in matchs[:8]:
+    for m in matchs[:12]:
         nom_a, id_a = m["homeTeam"]["name"], m["homeTeam"]["id"]
         nom_b, id_b = m["awayTeam"]["name"], m["awayTeam"]["id"]
         try:
