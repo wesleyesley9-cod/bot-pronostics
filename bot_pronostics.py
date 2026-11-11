@@ -19,7 +19,7 @@ API_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": FOOTBALL_TOKEN}
 LIGUE_MOYENNE = 1.4
 CHAT_ID_FILE = "chat_id.txt"
-HEURE_ENVOI = datetime.time(hour=10, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
+HEURE_ENVOI = datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
 
 COMPETITIONS = ["PL", "BL1", "SA", "PD", "FL1", "CL", "DED", "PPL", "ELC", "BSA", "WC", "EC"]
 EQUIPES = {}
@@ -207,19 +207,27 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     date_du_jour = datetime.date.today().isoformat()
-    try:
-        r = requests.get(
-            f"{API_URL}/matches",
-            headers=HEADERS,
-            params={"dateFrom": date_du_jour, "dateTo": date_du_jour},
-            timeout=10,
+    matchs = None
+    for tentative in range(3):
+        try:
+            r = requests.get(
+                f"{API_URL}/matches",
+                headers=HEADERS,
+                params={"dateFrom": date_du_jour, "dateTo": date_du_jour},
+                timeout=20,
+            )
+            matchs = [
+                m for m in r.json().get("matches", [])
+                if m["status"] in ("SCHEDULED", "TIMED")
+            ]
+            break
+        except Exception:
+            await asyncio.sleep(5)
+
+    if matchs is None:
+        await context.bot.send_message(
+            chat_id, "⚠️ L'API de football ne répond pas pour l'instant, réessaie avec /predict un peu plus tard."
         )
-        matchs = [
-            m for m in r.json().get("matches", [])
-            if m["status"] in ("SCHEDULED", "TIMED")
-        ]
-    except Exception as e:
-        await context.bot.send_message(chat_id, f"Erreur lors de la récupération des matchs : {e}")
         return
 
     if not matchs:
@@ -257,10 +265,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pronostics_jour, time=HEURE_ENVOI, chat_id=chat_id, name="pronostics_jour"
     )
 
+    heure_txt = HEURE_ENVOI.strftime("%Hh%M")
     await update.message.reply_text(
         "⚽ Salut ! Utilise /predict Equipe A vs Equipe B\n"
         "Exemple : /predict PSG vs Marseille\n\n"
-        "📅 Tu recevras aussi automatiquement les pronostics du jour chaque matin à 9h."
+        f"📅 Tu recevras aussi automatiquement les pronostics du jour chaque matin à {heure_txt}."
     )
 
 
