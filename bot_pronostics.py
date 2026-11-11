@@ -71,7 +71,9 @@ def trouver_equipe(nom_in):
     return None, None
 
 
-def stats_equipe(team_id):
+def stats_equipe(team_id, domicile=None):
+    """domicile=True : seulement les matchs a domicile. False : seulement a l'exterieur.
+    None : tous les matchs, peu importe le lieu."""
     date_fin = datetime.date.today()
     date_debut = date_fin - datetime.timedelta(days=200)
     r = requests.get(
@@ -85,9 +87,19 @@ def stats_equipe(team_id):
         timeout=10,
     )
     j = r.json()
-    matchs = j.get("matches", [])
-    matchs.sort(key=lambda m: m["utcDate"], reverse=True)
-    matchs = matchs[:10]
+    tous_les_matchs = j.get("matches", [])
+    tous_les_matchs.sort(key=lambda m: m["utcDate"], reverse=True)
+
+    if domicile is True:
+        matchs = [m for m in tous_les_matchs if m["homeTeam"]["id"] == team_id][:10]
+    elif domicile is False:
+        matchs = [m for m in tous_les_matchs if m["awayTeam"]["id"] == team_id][:10]
+    else:
+        matchs = tous_les_matchs[:10]
+
+    # Pas assez de matchs a domicile/exterieur ? On retombe sur l'ensemble des matchs.
+    if domicile is not None and len(matchs) < 3:
+        matchs = tous_les_matchs[:10]
 
     buts_marques, buts_encaisses, n = 0, 0, 0
     for m in matchs:
@@ -181,8 +193,8 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        buts_a, enc_a, n_a = stats_equipe(id_a)
-        buts_b, enc_b, n_b = stats_equipe(id_b)
+        buts_a, enc_a, n_a = stats_equipe(id_a, domicile=True)
+        buts_b, enc_b, n_b = stats_equipe(id_b, domicile=False)
 
         p_win, p_draw, p_lose, best = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
         await update.message.reply_text(
@@ -221,8 +233,8 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
         nom_a, id_a = m["homeTeam"]["name"], m["homeTeam"]["id"]
         nom_b, id_b = m["awayTeam"]["name"], m["awayTeam"]["id"]
         try:
-            buts_a, enc_a, n_a = stats_equipe(id_a)
-            buts_b, enc_b, n_b = stats_equipe(id_b)
+            buts_a, enc_a, n_a = stats_equipe(id_a, domicile=True)
+            buts_b, enc_b, n_b = stats_equipe(id_b, domicile=False)
             p_win, p_draw, p_lose, best = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
             await context.bot.send_message(
                 chat_id,
