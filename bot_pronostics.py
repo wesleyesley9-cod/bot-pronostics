@@ -1,4 +1,5 @@
 import os
+import re
 import math
 import time
 import asyncio
@@ -190,18 +191,22 @@ def ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confianc
     )
 
 
+SEPARATEUR = re.compile(r"\s+(?:vs|versus|contre)\s+", re.IGNORECASE)
+
+
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texte = " ".join(context.args)
-    texte_bas = texte.lower()
-    if " vs " not in texte_bas:
+    texte = " ".join(context.args).strip()
+    morceaux = SEPARATEUR.split(texte, maxsplit=1)
+
+    if len(morceaux) != 2 or not morceaux[0].strip() or not morceaux[1].strip():
         await update.message.reply_text(
-            "Format : /predict Equipe A vs Equipe B\nExemple : /predict PSG vs Marseille"
+            "Format : /predict Equipe A vs Equipe B\n"
+            "(vs, versus ou contre fonctionnent)\n"
+            "Exemple : /predict PSG vs Marseille"
         )
         return
 
-    idx = texte_bas.index(" vs ")
-    nom_a_in = texte[:idx].strip()
-    nom_b_in = texte[idx + 4:].strip()
+    nom_a_in, nom_b_in = morceaux[0].strip(), morceaux[1].strip()
 
     await update.message.reply_text("🔎 Recherche des équipes et des stats...")
 
@@ -295,6 +300,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     heure_txt = HEURE_ENVOI.strftime("%Hh%M")
     await update.message.reply_text(
         "⚽ Salut ! Utilise /predict Equipe A vs Equipe B\n"
+        "(vs, versus ou contre fonctionnent)\n"
         "Exemple : /predict PSG vs Marseille\n\n"
         f"📅 Tu recevras aussi automatiquement les pronostics du jour chaque matin à {heure_txt}."
     )
