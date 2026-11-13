@@ -141,7 +141,27 @@ def calcul_pronostic(buts_a, enc_a, buts_b, enc_b, ligue=LIGUE_MOYENNE):
                 best = (p, x, y)
 
     total = p_win + p_draw + p_lose
-    return p_win / total, p_draw / total, p_lose / total, best
+    return p_win / total, p_draw / total, p_lose / total, best, lam_a, lam_b
+
+
+def calc_btts(lam_a, lam_b):
+    """Probabilite que les deux equipes marquent au moins 1 but chacune."""
+    p_a_marque = 1 - poisson(lam_a, 0)
+    p_b_marque = 1 - poisson(lam_b, 0)
+    return p_a_marque * p_b_marque
+
+
+def calc_confiance(n_a, n_b, p_win, p_draw, p_lose):
+    """Retourne un score de confiance de 1 a 5 etoiles."""
+    probs = sorted([p_win, p_draw, p_lose], reverse=True)
+    ecart = probs[0] - probs[1]  # plus l'ecart est grand, plus un resultat se detache
+
+    points = 0.0
+    points += min(n_a, n_b) / 10 * 2       # jusqu'a 2 points selon le nombre de matchs analyses
+    points += min(ecart * 6, 3)            # jusqu'a 3 points selon la clarte du favori
+
+    etoiles_pleines = max(1, min(5, round(points)))
+    return "⭐" * etoiles_pleines + "☆" * (5 - etoiles_pleines)
 
 
 def barre(pct, taille=10):
@@ -149,7 +169,7 @@ def barre(pct, taille=10):
     return "█" * plein + "░" * (taille - plein)
 
 
-def ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b):
+def ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance):
     return (
         "```\n"
         "╔═══════════════════════╗\n"
@@ -160,6 +180,8 @@ def ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b):
         f" {'Nul':<12} {barre(p_draw)} {p_draw*100:>3.0f}%\n"
         f" {nom_b[:12]:<12} {barre(p_lose)} {p_lose*100:>3.0f}%\n\n"
         f" Score probable : {best[1]} - {best[2]}\n"
+        f" Les 2 équipes marquent : {p_btts*100:.0f}%\n"
+        f" Confiance : {confiance}\n"
         "───────────────────────────\n"
         f" (matchs analysés : {n_a} / {n_b})\n"
         " ⚠️ Estimation statistique,\n"
@@ -196,9 +218,12 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buts_a, enc_a, n_a = stats_equipe(id_a, domicile=True)
         buts_b, enc_b, n_b = stats_equipe(id_b, domicile=False)
 
-        p_win, p_draw, p_lose, best = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
+        p_win, p_draw, p_lose, best, lam_a, lam_b = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
+        p_btts = calc_btts(lam_a, lam_b)
+        confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
         await update.message.reply_text(
-            ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b), parse_mode="Markdown"
+            ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance),
+            parse_mode="Markdown",
         )
     except Exception as e:
         await update.message.reply_text(f"Erreur : {e}")
@@ -243,10 +268,12 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
         try:
             buts_a, enc_a, n_a = stats_equipe(id_a, domicile=True)
             buts_b, enc_b, n_b = stats_equipe(id_b, domicile=False)
-            p_win, p_draw, p_lose, best = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
+            p_win, p_draw, p_lose, best, lam_a, lam_b = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
+            p_btts = calc_btts(lam_a, lam_b)
+            confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
             await context.bot.send_message(
                 chat_id,
-                ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b),
+                ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance),
                 parse_mode="Markdown",
             )
         except Exception:
