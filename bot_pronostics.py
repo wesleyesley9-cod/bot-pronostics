@@ -15,12 +15,20 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # plus jamais ecrites en dur dans le code.
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 FOOTBALL_TOKEN = os.environ["FOOTBALL_TOKEN"]
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # si non defini, le bot reste ouvert a tous
+
+
+def est_autorise(chat_id):
+    if not ADMIN_CHAT_ID:
+        return True
+    return str(chat_id) == str(ADMIN_CHAT_ID)
 
 API_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": FOOTBALL_TOKEN}
 LIGUE_MOYENNE = 1.4
 CHAT_ID_FILE = "chat_id.txt"
 HEURE_ENVOI = datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
+HEURE_ENVOI_HOCKEY = datetime.time(hour=15, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
 
 COMPETITIONS = ["PL", "BL1", "SA", "PD", "FL1", "CL", "DED", "PPL", "ELC", "BSA", "WC", "EC"]
 EQUIPES = {}
@@ -282,6 +290,10 @@ SEPARATEUR = re.compile(r"\s+(?:vs|versus|contre)\s+", re.IGNORECASE)
 
 
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not est_autorise(update.effective_chat.id):
+        await update.message.reply_text("⛔ Ce bot est privé.")
+        return
+
     texte = " ".join(context.args).strip()
     morceaux = SEPARATEUR.split(texte, maxsplit=1)
 
@@ -322,6 +334,10 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def hockey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not est_autorise(update.effective_chat.id):
+        await update.message.reply_text("⛔ Ce bot est privé.")
+        return
+
     texte = " ".join(context.args).strip()
     morceaux = SEPARATEUR.split(texte, maxsplit=1)
 
@@ -417,25 +433,95 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(2)
 
 
+async def pronostics_jour_hockey(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    date_du_jour = datetime.date.today().isoformat()
+
+    matchs = None
+    for tentative in range(3):
+        try:
+            r = requests.get(f"{NHL_URL}/schedule/{date_du_jour}", timeout=20)
+            data = r.json()
+            jour = next(
+                (j for j in data.get("gameWeek", []) if j.get("date") == date_du_jour), None
+            )
+            matchs = [
+                m for m in (jour.get("games", []) if jour else [])
+                if m.get("gameState") in ("FUT", "PRE")
+            ]
+            break
+        except Exception:
+            await asyncio.sleep(5)
+
+    if matchs is None:
+        await context.bot.send_message(
+            chat_id, "⚠️ L'API NHL ne répond pas pour l'instant, réessaie avec /hockey un peu plus tard."
+        )
+        return
+
+    if not matchs:
+        await context.bot.send_message(chat_id, "🏒 Aucun match NHL aujourd'hui.")
+        return
+
+    await context.bot.send_message(
+        chat_id, f"🏒 Pronostics hockey du jour ({len(matchs)} match{'s' if len(matchs) > 1 else ''}) :"
+    )
+    for m in matchs[:12]:
+        try:
+            code_a = m["homeTeam"]["abbrev"]
+            code_b = m["awayTeam"]["abbrev"]
+            nom_a = m["homeTeam"].get("placeName", {}).get("default", code_a)
+            nom_b = m["awayTeam"].get("placeName", {}).get("default", code_b)
+
+            buts_a, enc_a, n_a = stats_equipe_nhl(code_a, domicile=True)
+            buts_b, enc_b, n_b = stats_equipe_nhl(code_b, domicile=False)
+            p_win, p_draw, p_lose, best, lam_a, lam_b = calcul_pronostic(
+                buts_a, enc_a, buts_b, enc_b, ligue=LIGUE_MOYENNE_NHL
+            )
+            p_btts = calc_btts(lam_a, lam_b)
+            confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
+            await context.bot.send_message(
+                chat_id,
+                ticket(
+                    nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance,
+                    emoji="🏒", label_nul="Nul (60 min)",
+                ),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if not est_autorise(chat_id):
+        await update.message.reply_text("⛔ Ce bot est privé.")
+        return
+
     with open(CHAT_ID_FILE, "w") as f:
         f.write(str(chat_id))
 
-    for job in context.job_queue.get_jobs_by_name("pronostics_jour"):
-        job.schedule_removal()
+    for nom_job in ("pronostics_jour", "pronostics_jour_hockey"):
+        for job in context.job_queue.get_jobs_by_name(nom_job):
+            job.schedule_removal()
     context.job_queue.run_daily(
         pronostics_jour, time=HEURE_ENVOI, chat_id=chat_id, name="pronostics_jour"
     )
+    context.job_queue.run_daily(
+        pronostics_jour_hockey, time=HEURE_ENVOI_HOCKEY, chat_id=chat_id, name="pronostics_jour_hockey"
+    )
 
-    heure_txt = HEURE_ENVOI.strftime("%Hh%M")
+    heure_foot = HEURE_ENVOI.strftime("%Hh%M")
+    heure_hockey = HEURE_ENVOI_HOCKEY.strftime("%Hh%M")
     await update.message.reply_text(
         "⚽ Salut ! Utilise /predict Equipe A vs Equipe B\n"
         "(vs, versus ou contre fonctionnent)\n"
         "Exemple : /predict PSG vs Marseille\n\n"
         "🏒 Pour le hockey (NHL) : /hockey Equipe A vs Equipe B\n"
         "Exemple : /hockey Boston vs Toronto\n\n"
-        f"📅 Tu recevras aussi automatiquement les pronostics du jour chaque matin à {heure_txt}."
+        f"📅 Foot : pronostics automatiques chaque jour à {heure_foot}.\n"
+        f"📅 Hockey : pronostics automatiques chaque jour à {heure_hockey}."
     )
 
 
@@ -453,6 +539,10 @@ if __name__ == "__main__":
             chat_id_sauve = int(f.read().strip())
         app.job_queue.run_daily(
             pronostics_jour, time=HEURE_ENVOI, chat_id=chat_id_sauve, name="pronostics_jour"
+        )
+        app.job_queue.run_daily(
+            pronostics_jour_hockey, time=HEURE_ENVOI_HOCKEY, chat_id=chat_id_sauve,
+            name="pronostics_jour_hockey",
         )
         print(f"Envoi quotidien programme pour le chat {chat_id_sauve}")
     except FileNotFoundError:
