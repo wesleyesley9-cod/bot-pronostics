@@ -149,18 +149,21 @@ def stats_equipe_nhl(tricode, domicile=None):
     if domicile is not None and len(matchs) < 3:
         matchs = tous_les_matchs[:10]
 
-    buts_marques, buts_encaisses, n = 0, 0, 0
-    for m in matchs:
+    DECAY = 0.85  # les matchs les plus recents comptent plus (matchs[0] = le plus recent)
+    bm_pond, be_pond, poids_total, n = 0.0, 0.0, 0.0, 0
+    for i, m in enumerate(matchs):
         est_domicile = m["homeTeam"]["abbrev"] == tricode
         bm = m["homeTeam"]["score"] if est_domicile else m["awayTeam"]["score"]
         be = m["awayTeam"]["score"] if est_domicile else m["homeTeam"]["score"]
-        buts_marques += bm
-        buts_encaisses += be
+        poids = DECAY ** i
+        bm_pond += bm * poids
+        be_pond += be * poids
+        poids_total += poids
         n += 1
 
     if n == 0:
         return LIGUE_MOYENNE_NHL, LIGUE_MOYENNE_NHL, 0
-    return buts_marques / n, buts_encaisses / n, n
+    return bm_pond / poids_total, be_pond / poids_total, n
 
 
 # ---------- Mini serveur web, juste pour qu'UptimeRobot ait quelque chose a "pinger" ----------
@@ -239,24 +242,24 @@ def stats_equipe(team_id, domicile=None):
     if domicile is not None and len(matchs) < 3:
         matchs = tous_les_matchs[:10]
 
-    buts_marques, buts_encaisses, n = 0, 0, 0
-    for m in matchs:
+    DECAY = 0.85  # les matchs les plus recents comptent plus (matchs[0] = le plus recent)
+    bm_pond, be_pond, poids_total, n = 0.0, 0.0, 0.0, 0
+    for i, m in enumerate(matchs):
         home_id = m["homeTeam"]["id"]
         gh = m["score"]["fullTime"]["home"]
         ga = m["score"]["fullTime"]["away"]
         if gh is None or ga is None:
             continue
-        if home_id == team_id:
-            buts_marques += gh
-            buts_encaisses += ga
-        else:
-            buts_marques += ga
-            buts_encaisses += gh
+        bm, be = (gh, ga) if home_id == team_id else (ga, gh)
+        poids = DECAY ** i
+        bm_pond += bm * poids
+        be_pond += be * poids
+        poids_total += poids
         n += 1
 
     if n == 0:
         return LIGUE_MOYENNE, LIGUE_MOYENNE, 0
-    return buts_marques / n, buts_encaisses / n, n
+    return bm_pond / poids_total, be_pond / poids_total, n
 
 
 def calcul_pronostic(buts_a, enc_a, buts_b, enc_b, ligue=LIGUE_MOYENNE):
