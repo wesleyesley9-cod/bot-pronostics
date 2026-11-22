@@ -16,6 +16,49 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 FOOTBALL_TOKEN = os.environ["FOOTBALL_TOKEN"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # si non defini, le bot reste ouvert a tous
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+
+def sb_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def label_resultat(p_win, p_draw, p_lose):
+    m = max(p_win, p_draw, p_lose)
+    if m == p_win:
+        return "victoire_a"
+    if m == p_draw:
+        return "nul"
+    return "victoire_b"
+
+
+def enregistrer_pronostic(sport, equipe_a, equipe_b, id_a, id_b, p_win, p_draw, p_lose, best):
+    if not SUPABASE_URL:
+        return
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/pronostics",
+            headers={**sb_headers(), "Prefer": "return=minimal"},
+            json={
+                "sport": sport,
+                "equipe_a": equipe_a,
+                "equipe_b": equipe_b,
+                "id_a": str(id_a),
+                "id_b": str(id_b),
+                "p_win": p_win,
+                "p_draw": p_draw,
+                "p_lose": p_lose,
+                "score_predit": f"{best[1]}-{best[2]}",
+            },
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def est_autorise(chat_id):
@@ -325,6 +368,7 @@ async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p_win, p_draw, p_lose, best, lam_a, lam_b = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
         p_btts = calc_btts(lam_a, lam_b)
         confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
+        enregistrer_pronostic("foot", nom_a, nom_b, id_a, id_b, p_win, p_draw, p_lose, best)
         await update.message.reply_text(
             ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance),
             parse_mode="Markdown",
@@ -370,6 +414,7 @@ async def hockey(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         p_btts = calc_btts(lam_a, lam_b)
         confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
+        enregistrer_pronostic("hockey", nom_a, nom_b, code_a, code_b, p_win, p_draw, p_lose, best)
         await update.message.reply_text(
             ticket(
                 nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance,
@@ -390,7 +435,11 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
             r = requests.get(
                 f"{API_URL}/matches",
                 headers=HEADERS,
-                params={"dateFrom": date_du_jour, "dateTo": date_du_jour},
+                params={
+                    "dateFrom": date_du_jour,
+                    "dateTo": date_du_jour,
+                    "competitions": ",".join(COMPETITIONS),
+                },
                 timeout=20,
             )
             matchs = [
@@ -422,6 +471,7 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
             buts_b, enc_b, n_b = stats_equipe(id_b, domicile=False)
             p_win, p_draw, p_lose, best, lam_a, lam_b = calcul_pronostic(buts_a, enc_a, buts_b, enc_b)
             p_btts = calc_btts(lam_a, lam_b)
+            enregistrer_pronostic("foot", nom_a, nom_b, id_a, id_b, p_win, p_draw, p_lose, best)
             confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
             await context.bot.send_message(
                 chat_id,
@@ -480,6 +530,7 @@ async def pronostics_jour_hockey(context: ContextTypes.DEFAULT_TYPE):
             )
             p_btts = calc_btts(lam_a, lam_b)
             confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
+            enregistrer_pronostic("hockey", nom_a, nom_b, code_a, code_b, p_win, p_draw, p_lose, best)
             await context.bot.send_message(
                 chat_id,
                 ticket(
@@ -493,6 +544,125 @@ async def pronostics_jour_hockey(context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(2)
 
 
+async def verifier_pronostics(context: ContextTypes.DEFAULT_TYPE):
+    """Verifie les pronostics vieux de 3 jours ou plus, en cherchant le vrai resultat."""
+    if not SUPABASE_URL:
+        return
+    try:
+        limite = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/pronostics",
+            headers=sb_headers(),
+            params={
+                "verifie": "eq.false",
+                "date_creation": f"lt.{limite}",
+                "select": "*",
+                "limit": "50",
+            },
+            timeout=15,
+        )
+        a_verifier = r.json()
+    except Exception:
+        return
+
+    for p in a_verifier:
+        try:
+            resultat_reel = None
+            if p["sport"] == "foot":
+                id_a, id_b = int(p["id_a"]), int(p["id_b"])
+                rr = requests.get(
+                    f"{API_URL}/teams/{id_a}/matches",
+                    headers=HEADERS,
+                    params={
+                        "status": "FINISHED",
+                        "dateFrom": p["date_creation"][:10],
+                        "dateTo": datetime.date.today().isoformat(),
+                    },
+                    timeout=15,
+                )
+                for m in rr.json().get("matches", []):
+                    if m["homeTeam"]["id"] == id_a and m["awayTeam"]["id"] == id_b:
+                        gh, ga = m["score"]["fullTime"]["home"], m["score"]["fullTime"]["away"]
+                        if gh is not None and ga is not None:
+                            resultat_reel = "victoire_a" if gh > ga else ("nul" if gh == ga else "victoire_b")
+                        break
+            else:  # hockey
+                code_a, code_b = p["id_a"], p["id_b"]
+                rr = requests.get(f"{NHL_URL}/club-schedule-season/{code_a}/{saison_nhl()}", timeout=15)
+                for m in rr.json().get("games", []):
+                    if (
+                        m.get("gameState") == "OFF"
+                        and m["homeTeam"]["abbrev"] == code_a
+                        and m["awayTeam"]["abbrev"] == code_b
+                        and m.get("gameDate", "") >= p["date_creation"][:10]
+                    ):
+                        gh, ga = m["homeTeam"]["score"], m["awayTeam"]["score"]
+                        resultat_reel = "victoire_a" if gh > ga else ("nul" if gh == ga else "victoire_b")
+                        break
+
+            if resultat_reel is None:
+                continue  # match pas encore joue ou pas trouve, on reessaiera plus tard
+
+            predit = label_resultat(p["p_win"], p["p_draw"], p["p_lose"])
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/pronostics",
+                headers={**sb_headers(), "Prefer": "return=minimal"},
+                params={"id": f"eq.{p['id']}"},
+                json={
+                    "resultat_reel": resultat_reel,
+                    "correct": predit == resultat_reel,
+                    "verifie": True,
+                },
+                timeout=10,
+            )
+        except Exception:
+            continue
+
+
+async def fiabilite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not est_autorise(update.effective_chat.id):
+        await update.message.reply_text("⛔ Ce bot est privé.")
+        return
+    if not SUPABASE_URL:
+        await update.message.reply_text("La base de données n'est pas configurée.")
+        return
+
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/pronostics",
+            headers=sb_headers(),
+            params={"verifie": "eq.true", "select": "correct,sport"},
+            timeout=15,
+        )
+        lignes = r.json()
+    except Exception as e:
+        await update.message.reply_text(f"Erreur : {e}")
+        return
+
+    if not lignes:
+        await update.message.reply_text(
+            "Pas encore assez de pronostics vérifiés (il faut attendre que les matchs aient eu lieu)."
+        )
+        return
+
+    total = len(lignes)
+    corrects = sum(1 for l in lignes if l["correct"])
+    foot = [l for l in lignes if l["sport"] == "foot"]
+    hockey_l = [l for l in lignes if l["sport"] == "hockey"]
+
+    def pct(liste):
+        if not liste:
+            return "N/A"
+        return f"{sum(1 for l in liste if l['correct']) / len(liste) * 100:.0f}%"
+
+    await update.message.reply_text(
+        "📊 Fiabilité du bot\n\n"
+        f"Global : {corrects}/{total} ({corrects/total*100:.0f}%)\n"
+        f"⚽ Foot : {pct(foot)} ({len(foot)} pronostics)\n"
+        f"🏒 Hockey : {pct(hockey_l)} ({len(hockey_l)} pronostics)"
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not est_autorise(chat_id):
@@ -502,7 +672,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(CHAT_ID_FILE, "w") as f:
         f.write(str(chat_id))
 
-    for nom_job in ("pronostics_jour", "pronostics_jour_hockey"):
+    for nom_job in ("pronostics_jour", "pronostics_jour_hockey", "verifier_pronostics"):
         for job in context.job_queue.get_jobs_by_name(nom_job):
             job.schedule_removal()
     context.job_queue.run_daily(
@@ -510,6 +680,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.job_queue.run_daily(
         pronostics_jour_hockey, time=HEURE_ENVOI_HOCKEY, chat_id=chat_id, name="pronostics_jour_hockey"
+    )
+    context.job_queue.run_daily(
+        verifier_pronostics,
+        time=datetime.time(hour=4, minute=0, tzinfo=ZoneInfo("Africa/Abidjan")),
+        chat_id=chat_id,
+        name="verifier_pronostics",
     )
 
     heure_foot = HEURE_ENVOI.strftime("%Hh%M")
@@ -521,7 +697,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏒 Pour le hockey (NHL) : /hockey Equipe A vs Equipe B\n"
         "Exemple : /hockey Boston vs Toronto\n\n"
         f"📅 Foot : pronostics automatiques chaque jour à {heure_foot}.\n"
-        f"📅 Hockey : pronostics automatiques chaque jour à {heure_hockey}."
+        f"📅 Hockey : pronostics automatiques chaque jour à {heure_hockey}.\n\n"
+        "📊 Utilise /fiabilite pour voir le taux de réussite réel du bot."
     )
 
 
@@ -533,6 +710,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("predict", predict))
     app.add_handler(CommandHandler("hockey", hockey))
+    app.add_handler(CommandHandler("fiabilite", fiabilite))
 
     try:
         with open(CHAT_ID_FILE) as f:
@@ -543,6 +721,12 @@ if __name__ == "__main__":
         app.job_queue.run_daily(
             pronostics_jour_hockey, time=HEURE_ENVOI_HOCKEY, chat_id=chat_id_sauve,
             name="pronostics_jour_hockey",
+        )
+        app.job_queue.run_daily(
+            verifier_pronostics,
+            time=datetime.time(hour=4, minute=0, tzinfo=ZoneInfo("Africa/Abidjan")),
+            chat_id=chat_id_sauve,
+            name="verifier_pronostics",
         )
         print(f"Envoi quotidien programme pour le chat {chat_id_sauve}")
     except FileNotFoundError:
