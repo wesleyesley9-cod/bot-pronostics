@@ -2,7 +2,6 @@ import os
 import re
 import math
 import time
-import asyncio
 import datetime
 import threading
 from zoneinfo import ZoneInfo
@@ -69,7 +68,6 @@ def est_autorise(chat_id):
 API_URL = "https://api.football-data.org/v4"
 HEADERS = {"X-Auth-Token": FOOTBALL_TOKEN}
 LIGUE_MOYENNE = 1.4
-CHAT_ID_FILE = "chat_id.txt"
 HEURE_ENVOI = datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
 HEURE_ENVOI_HOCKEY = datetime.time(hour=15, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
 
@@ -173,6 +171,28 @@ web = Flask(__name__)
 @web.route("/")
 def accueil():
     return "Bot de pronostics en ligne."
+
+
+@web.route("/run/foot")
+def route_foot():
+    if not ADMIN_CHAT_ID:
+        return "ADMIN_CHAT_ID non configure", 400
+    pronostics_jour(ADMIN_CHAT_ID)
+    return "OK"
+
+
+@web.route("/run/hockey")
+def route_hockey():
+    if not ADMIN_CHAT_ID:
+        return "ADMIN_CHAT_ID non configure", 400
+    pronostics_jour_hockey(ADMIN_CHAT_ID)
+    return "OK"
+
+
+@web.route("/run/verify")
+def route_verify():
+    verifier_pronostics()
+    return "OK"
 
 
 def lancer_serveur_web():
@@ -429,8 +449,21 @@ async def hockey(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Erreur : {e}")
 
 
-async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
+def tg_envoyer(chat_id, texte, markdown=False):
+    """Envoie un message Telegram directement par HTTP, sans dependre de la file d'attente
+    interne du bot (donc fiable meme declenche depuis une route web externe)."""
+    try:
+        data = {"chat_id": chat_id, "text": texte}
+        if markdown:
+            data["parse_mode"] = "Markdown"
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=data, timeout=15
+        )
+    except Exception:
+        pass
+
+
+def pronostics_jour(chat_id):
     date_du_jour = datetime.date.today().isoformat()
     matchs = None
     for tentative in range(3):
@@ -451,21 +484,17 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
             ]
             break
         except Exception:
-            await asyncio.sleep(5)
+            time.sleep(5)
 
     if matchs is None:
-        await context.bot.send_message(
-            chat_id, "⚠️ L'API de football ne répond pas pour l'instant, réessaie avec /predict un peu plus tard."
-        )
+        tg_envoyer(chat_id, "⚠️ L'API de football ne répond pas pour l'instant, réessaie avec /predict un peu plus tard.")
         return
 
     if not matchs:
-        await context.bot.send_message(chat_id, "🌞 Bonjour ! Aucun match majeur aujourd'hui.")
+        tg_envoyer(chat_id, "🌞 Bonjour ! Aucun match majeur aujourd'hui.")
         return
 
-    await context.bot.send_message(
-        chat_id, f"🌞 Bonjour ! Pronostics du jour ({len(matchs)} match{'s' if len(matchs) > 1 else ''}) :"
-    )
+    tg_envoyer(chat_id, f"🌞 Bonjour ! Pronostics du jour ({len(matchs)} match{'s' if len(matchs) > 1 else ''}) :")
     for m in matchs[:12]:
         nom_a, id_a = m["homeTeam"]["name"], m["homeTeam"]["id"]
         nom_b, id_b = m["awayTeam"]["name"], m["awayTeam"]["id"]
@@ -476,18 +505,17 @@ async def pronostics_jour(context: ContextTypes.DEFAULT_TYPE):
             p_btts = calc_btts(lam_a, lam_b)
             enregistrer_pronostic("foot", nom_a, nom_b, id_a, id_b, p_win, p_draw, p_lose, best)
             confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
-            await context.bot.send_message(
+            tg_envoyer(
                 chat_id,
                 ticket(nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance),
-                parse_mode="Markdown",
+                markdown=True,
             )
         except Exception:
             pass
-        await asyncio.sleep(2)
+        time.sleep(2)
 
 
-async def pronostics_jour_hockey(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
+def pronostics_jour_hockey(chat_id):
     date_du_jour = datetime.date.today().isoformat()
 
     matchs = None
@@ -504,236 +532,18 @@ async def pronostics_jour_hockey(context: ContextTypes.DEFAULT_TYPE):
             ]
             break
         except Exception:
-            await asyncio.sleep(5)
+            time.sleep(5)
 
     if matchs is None:
-        await context.bot.send_message(
-            chat_id, "⚠️ L'API NHL ne répond pas pour l'instant, réessaie avec /hockey un peu plus tard."
-        )
+        tg_envoyer(chat_id, "⚠️ L'API NHL ne répond pas pour l'instant, réessaie avec /hockey un peu plus tard.")
         return
 
     if not matchs:
-        await context.bot.send_message(chat_id, "🏒 Aucun match NHL aujourd'hui.")
+        tg_envoyer(chat_id, "🏒 Aucun match NHL aujourd'hui.")
         return
 
-    await context.bot.send_message(
-        chat_id, f"🏒 Pronostics hockey du jour ({len(matchs)} match{'s' if len(matchs) > 1 else ''}) :"
-    )
+    tg_envoyer(chat_id, f"🏒 Pronostics hockey du jour ({len(matchs)} match{'s' if len(matchs) > 1 else ''}) :")
     for m in matchs[:12]:
         try:
             code_a = m["homeTeam"]["abbrev"]
-            code_b = m["awayTeam"]["abbrev"]
-            nom_a = m["homeTeam"].get("placeName", {}).get("default", code_a)
-            nom_b = m["awayTeam"].get("placeName", {}).get("default", code_b)
-
-            buts_a, enc_a, n_a = stats_equipe_nhl(code_a, domicile=True)
-            buts_b, enc_b, n_b = stats_equipe_nhl(code_b, domicile=False)
-            p_win, p_draw, p_lose, best, lam_a, lam_b = calcul_pronostic(
-                buts_a, enc_a, buts_b, enc_b, ligue=LIGUE_MOYENNE_NHL
-            )
-            p_btts = calc_btts(lam_a, lam_b)
-            confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
-            enregistrer_pronostic("hockey", nom_a, nom_b, code_a, code_b, p_win, p_draw, p_lose, best)
-            await context.bot.send_message(
-                chat_id,
-                ticket(
-                    nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance,
-                    emoji="🏒", label_nul="Nul (60 min)",
-                ),
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-        await asyncio.sleep(2)
-
-
-async def verifier_pronostics(context: ContextTypes.DEFAULT_TYPE):
-    """Verifie les pronostics vieux de 3 jours ou plus, en cherchant le vrai resultat."""
-    if not SUPABASE_URL:
-        return
-    try:
-        limite = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/pronostics",
-            headers=sb_headers(),
-            params={
-                "verifie": "eq.false",
-                "date_creation": f"lt.{limite}",
-                "select": "*",
-                "limit": "50",
-            },
-            timeout=15,
-        )
-        a_verifier = r.json()
-    except Exception:
-        return
-
-    for p in a_verifier:
-        try:
-            resultat_reel = None
-            if p["sport"] == "foot":
-                id_a, id_b = int(p["id_a"]), int(p["id_b"])
-                rr = requests.get(
-                    f"{API_URL}/teams/{id_a}/matches",
-                    headers=HEADERS,
-                    params={
-                        "status": "FINISHED",
-                        "dateFrom": p["date_creation"][:10],
-                        "dateTo": datetime.date.today().isoformat(),
-                    },
-                    timeout=15,
-                )
-                for m in rr.json().get("matches", []):
-                    if m["homeTeam"]["id"] == id_a and m["awayTeam"]["id"] == id_b:
-                        gh, ga = m["score"]["fullTime"]["home"], m["score"]["fullTime"]["away"]
-                        if gh is not None and ga is not None:
-                            resultat_reel = "victoire_a" if gh > ga else ("nul" if gh == ga else "victoire_b")
-                        break
-            else:  # hockey
-                code_a, code_b = p["id_a"], p["id_b"]
-                rr = requests.get(f"{NHL_URL}/club-schedule-season/{code_a}/{saison_nhl()}", timeout=15)
-                for m in rr.json().get("games", []):
-                    if (
-                        m.get("gameState") == "OFF"
-                        and m["homeTeam"]["abbrev"] == code_a
-                        and m["awayTeam"]["abbrev"] == code_b
-                        and m.get("gameDate", "") >= p["date_creation"][:10]
-                    ):
-                        gh, ga = m["homeTeam"]["score"], m["awayTeam"]["score"]
-                        resultat_reel = "victoire_a" if gh > ga else ("nul" if gh == ga else "victoire_b")
-                        break
-
-            if resultat_reel is None:
-                continue  # match pas encore joue ou pas trouve, on reessaiera plus tard
-
-            predit = label_resultat(p["p_win"], p["p_draw"], p["p_lose"])
-            requests.patch(
-                f"{SUPABASE_URL}/rest/v1/pronostics",
-                headers={**sb_headers(), "Prefer": "return=minimal"},
-                params={"id": f"eq.{p['id']}"},
-                json={
-                    "resultat_reel": resultat_reel,
-                    "correct": predit == resultat_reel,
-                    "verifie": True,
-                },
-                timeout=10,
-            )
-        except Exception:
-            continue
-
-
-async def fiabilite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not est_autorise(update.effective_chat.id):
-        await update.message.reply_text("⛔ Ce bot est privé.")
-        return
-    if not SUPABASE_URL:
-        await update.message.reply_text("La base de données n'est pas configurée.")
-        return
-
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/pronostics",
-            headers=sb_headers(),
-            params={"verifie": "eq.true", "select": "correct,sport"},
-            timeout=15,
-        )
-        lignes = r.json()
-    except Exception as e:
-        await update.message.reply_text(f"Erreur : {e}")
-        return
-
-    if not lignes:
-        await update.message.reply_text(
-            "Pas encore assez de pronostics vérifiés (il faut attendre que les matchs aient eu lieu)."
-        )
-        return
-
-    total = len(lignes)
-    corrects = sum(1 for l in lignes if l["correct"])
-    foot = [l for l in lignes if l["sport"] == "foot"]
-    hockey_l = [l for l in lignes if l["sport"] == "hockey"]
-
-    def pct(liste):
-        if not liste:
-            return "N/A"
-        return f"{sum(1 for l in liste if l['correct']) / len(liste) * 100:.0f}%"
-
-    await update.message.reply_text(
-        "📊 Fiabilité du bot\n\n"
-        f"Global : {corrects}/{total} ({corrects/total*100:.0f}%)\n"
-        f"⚽ Foot : {pct(foot)} ({len(foot)} pronostics)\n"
-        f"🏒 Hockey : {pct(hockey_l)} ({len(hockey_l)} pronostics)"
-    )
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not est_autorise(chat_id):
-        await update.message.reply_text("⛔ Ce bot est privé.")
-        return
-
-    with open(CHAT_ID_FILE, "w") as f:
-        f.write(str(chat_id))
-
-    for nom_job in ("pronostics_jour", "pronostics_jour_hockey", "verifier_pronostics"):
-        for job in context.job_queue.get_jobs_by_name(nom_job):
-            job.schedule_removal()
-    context.job_queue.run_daily(
-        pronostics_jour, time=HEURE_ENVOI, chat_id=chat_id, name="pronostics_jour"
-    )
-    context.job_queue.run_daily(
-        pronostics_jour_hockey, time=HEURE_ENVOI_HOCKEY, chat_id=chat_id, name="pronostics_jour_hockey"
-    )
-    context.job_queue.run_daily(
-        verifier_pronostics,
-        time=datetime.time(hour=4, minute=0, tzinfo=ZoneInfo("Africa/Abidjan")),
-        chat_id=chat_id,
-        name="verifier_pronostics",
-    )
-
-    heure_foot = HEURE_ENVOI.strftime("%Hh%M")
-    heure_hockey = HEURE_ENVOI_HOCKEY.strftime("%Hh%M")
-    await update.message.reply_text(
-        "⚽ Salut ! Utilise /predict Equipe A vs Equipe B\n"
-        "(vs, versus ou contre fonctionnent)\n"
-        "Exemple : /predict PSG vs Marseille\n\n"
-        "🏒 Pour le hockey (NHL) : /hockey Equipe A vs Equipe B\n"
-        "Exemple : /hockey Boston vs Toronto\n\n"
-        f"📅 Foot : pronostics automatiques chaque jour à {heure_foot}.\n"
-        f"📅 Hockey : pronostics automatiques chaque jour à {heure_hockey}.\n\n"
-        "📊 Utilise /fiabilite pour voir le taux de réussite réel du bot."
-    )
-
-
-if __name__ == "__main__":
-    threading.Thread(target=lancer_serveur_web, daemon=True).start()
-
-    charger_equipes()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("predict", predict))
-    app.add_handler(CommandHandler("hockey", hockey))
-    app.add_handler(CommandHandler("fiabilite", fiabilite))
-
-    try:
-        with open(CHAT_ID_FILE) as f:
-            chat_id_sauve = int(f.read().strip())
-        app.job_queue.run_daily(
-            pronostics_jour, time=HEURE_ENVOI, chat_id=chat_id_sauve, name="pronostics_jour"
-        )
-        app.job_queue.run_daily(
-            pronostics_jour_hockey, time=HEURE_ENVOI_HOCKEY, chat_id=chat_id_sauve,
-            name="pronostics_jour_hockey",
-        )
-        app.job_queue.run_daily(
-            verifier_pronostics,
-            time=datetime.time(hour=4, minute=0, tzinfo=ZoneInfo("Africa/Abidjan")),
-            chat_id=chat_id_sauve,
-            name="verifier_pronostics",
-        )
-        print(f"Envoi quotidien programme pour le chat {chat_id_sauve}")
-    except FileNotFoundError:
-        pass
-
-    print("Bot lance...")
-    app.run_polling()
+            code_b = m["awayTeam"]["abb
