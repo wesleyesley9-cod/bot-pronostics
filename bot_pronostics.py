@@ -478,8 +478,9 @@ def pronostics_jour(chat_id):
                 },
                 timeout=20,
             )
-            tous = r.json().get("matches", [])
-            print(f"DEBUG pronostics_jour: {len(tous)} matchs bruts recus, statuts: {[m['status'] for m in tous]}")
+            j = r.json()
+            tous = j.get("matches", [])
+            print(f"DEBUG pronostics_jour: code={r.status_code}, cles_reponse={list(j.keys())}, message={j.get('message')}, {len(tous)} matchs bruts, statuts: {[m['status'] for m in tous]}")
             matchs = [m for m in tous if m["status"] in ("SCHEDULED", "TIMED")]
             break
         except Exception as e:
