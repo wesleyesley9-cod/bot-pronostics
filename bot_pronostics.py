@@ -478,12 +478,12 @@ def pronostics_jour(chat_id):
                 },
                 timeout=20,
             )
-            matchs = [
-                m for m in r.json().get("matches", [])
-                if m["status"] in ("SCHEDULED", "TIMED")
-            ]
+            tous = r.json().get("matches", [])
+            print(f"DEBUG pronostics_jour: {len(tous)} matchs bruts recus, statuts: {[m['status'] for m in tous]}")
+            matchs = [m for m in tous if m["status"] in ("SCHEDULED", "TIMED")]
             break
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG pronostics_jour erreur: {e}")
             time.sleep(5)
 
     if matchs is None:
@@ -546,4 +546,179 @@ def pronostics_jour_hockey(chat_id):
     for m in matchs[:12]:
         try:
             code_a = m["homeTeam"]["abbrev"]
-            code_b = m["awayTeam"]["abb
+            code_b = m["awayTeam"]["abbrev"]
+            nom_a = m["homeTeam"].get("placeName", {}).get("default", code_a)
+            nom_b = m["awayTeam"].get("placeName", {}).get("default", code_b)
+
+            buts_a, enc_a, n_a = stats_equipe_nhl(code_a, domicile=True)
+            buts_b, enc_b, n_b = stats_equipe_nhl(code_b, domicile=False)
+            p_win, p_draw, p_lose, best, lam_a, lam_b = calcul_pronostic(
+                buts_a, enc_a, buts_b, enc_b, ligue=LIGUE_MOYENNE_NHL
+            )
+            p_btts = calc_btts(lam_a, lam_b)
+            confiance = calc_confiance(n_a, n_b, p_win, p_draw, p_lose)
+            enregistrer_pronostic("hockey", nom_a, nom_b, code_a, code_b, p_win, p_draw, p_lose, best)
+            tg_envoyer(
+                chat_id,
+                ticket(
+                    nom_a, nom_b, p_win, p_draw, p_lose, best, n_a, n_b, p_btts, confiance,
+                    emoji="🏒", label_nul="Nul (60 min)",
+                ),
+                markdown=True,
+            )
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def verifier_pronostics():
+    """Verifie les pronostics vieux de 3 jours ou plus, en cherchant le vrai resultat."""
+    if not SUPABASE_URL:
+        return
+    try:
+        limite = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/pronostics",
+            headers=sb_headers(),
+            params={
+                "verifie": "eq.false",
+                "date_creation": f"lt.{limite}",
+                "select": "*",
+                "limit": "50",
+            },
+            timeout=15,
+        )
+        a_verifier = r.json()
+    except Exception:
+        return
+
+    for p in a_verifier:
+        try:
+            resultat_reel = None
+            if p["sport"] == "foot":
+                id_a, id_b = int(p["id_a"]), int(p["id_b"])
+                rr = requests.get(
+                    f"{API_URL}/teams/{id_a}/matches",
+                    headers=HEADERS,
+                    params={
+                        "status": "FINISHED",
+                        "dateFrom": p["date_creation"][:10],
+                        "dateTo": datetime.date.today().isoformat(),
+                    },
+                    timeout=15,
+                )
+                for m in rr.json().get("matches", []):
+                    if m["homeTeam"]["id"] == id_a and m["awayTeam"]["id"] == id_b:
+                        gh, ga = m["score"]["fullTime"]["home"], m["score"]["fullTime"]["away"]
+                        if gh is not None and ga is not None:
+                            resultat_reel = "victoire_a" if gh > ga else ("nul" if gh == ga else "victoire_b")
+                        break
+            else:  # hockey
+                code_a, code_b = p["id_a"], p["id_b"]
+                rr = requests.get(f"{NHL_URL}/club-schedule-season/{code_a}/{saison_nhl()}", timeout=15)
+                for m in rr.json().get("games", []):
+                    if (
+                        m.get("gameState") == "OFF"
+                        and m["homeTeam"]["abbrev"] == code_a
+                        and m["awayTeam"]["abbrev"] == code_b
+                        and m.get("gameDate", "") >= p["date_creation"][:10]
+                    ):
+                        gh, ga = m["homeTeam"]["score"], m["awayTeam"]["score"]
+                        resultat_reel = "victoire_a" if gh > ga else ("nul" if gh == ga else "victoire_b")
+                        break
+
+            if resultat_reel is None:
+                continue  # match pas encore joue ou pas trouve, on reessaiera plus tard
+
+            predit = label_resultat(p["p_win"], p["p_draw"], p["p_lose"])
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/pronostics",
+                headers={**sb_headers(), "Prefer": "return=minimal"},
+                params={"id": f"eq.{p['id']}"},
+                json={
+                    "resultat_reel": resultat_reel,
+                    "correct": predit == resultat_reel,
+                    "verifie": True,
+                },
+                timeout=10,
+            )
+        except Exception:
+            continue
+
+
+async def fiabilite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not est_autorise(update.effective_chat.id):
+        await update.message.reply_text("⛔ Ce bot est privé.")
+        return
+    if not SUPABASE_URL:
+        await update.message.reply_text("La base de données n'est pas configurée.")
+        return
+
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/pronostics",
+            headers=sb_headers(),
+            params={"verifie": "eq.true", "select": "correct,sport"},
+            timeout=15,
+        )
+        lignes = r.json()
+    except Exception as e:
+        await update.message.reply_text(f"Erreur : {e}")
+        return
+
+    if not lignes:
+        await update.message.reply_text(
+            "Pas encore assez de pronostics vérifiés (il faut attendre que les matchs aient eu lieu)."
+        )
+        return
+
+    total = len(lignes)
+    corrects = sum(1 for l in lignes if l["correct"])
+    foot = [l for l in lignes if l["sport"] == "foot"]
+    hockey_l = [l for l in lignes if l["sport"] == "hockey"]
+
+    def pct(liste):
+        if not liste:
+            return "N/A"
+        return f"{sum(1 for l in liste if l['correct']) / len(liste) * 100:.0f}%"
+
+    await update.message.reply_text(
+        "📊 Fiabilité du bot\n\n"
+        f"Global : {corrects}/{total} ({corrects/total*100:.0f}%)\n"
+        f"⚽ Foot : {pct(foot)} ({len(foot)} pronostics)\n"
+        f"🏒 Hockey : {pct(hockey_l)} ({len(hockey_l)} pronostics)"
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not est_autorise(chat_id):
+        await update.message.reply_text("⛔ Ce bot est privé.")
+        return
+
+    heure_foot = HEURE_ENVOI.strftime("%Hh%M")
+    heure_hockey = HEURE_ENVOI_HOCKEY.strftime("%Hh%M")
+    await update.message.reply_text(
+        "⚽ Salut ! Utilise /predict Equipe A vs Equipe B\n"
+        "(vs, versus ou contre fonctionnent)\n"
+        "Exemple : /predict PSG vs Marseille\n\n"
+        "🏒 Pour le hockey (NHL) : /hockey Equipe A vs Equipe B\n"
+        "Exemple : /hockey Boston vs Toronto\n\n"
+        f"📅 Foot : pronostics automatiques chaque jour à {heure_foot}.\n"
+        f"📅 Hockey : pronostics automatiques chaque jour à {heure_hockey}.\n\n"
+        "📊 Utilise /fiabilite pour voir le taux de réussite réel du bot."
+    )
+
+
+if __name__ == "__main__":
+    threading.Thread(target=lancer_serveur_web, daemon=True).start()
+
+    charger_equipes()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("predict", predict))
+    app.add_handler(CommandHandler("hockey", hockey))
+    app.add_handler(CommandHandler("fiabilite", fiabilite))
+
+    print("Bot lance...")
+    app.run_polling()
