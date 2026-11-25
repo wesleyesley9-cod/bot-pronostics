@@ -72,6 +72,7 @@ HEURE_ENVOI = datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
 HEURE_ENVOI_HOCKEY = datetime.time(hour=15, minute=0, tzinfo=ZoneInfo("Africa/Abidjan"))
 
 COMPETITIONS = ["PL", "BL1", "SA", "PD", "FL1", "CL", "DED", "PPL", "ELC", "BSA", "WC", "EC"]
+COMPETITIONS_ID = ["2021", "2002", "2019", "2014", "2015", "2001", "2003", "2017", "2016", "2013", "2000", "2018"]
 EQUIPES = {}
 
 # ---------- Hockey (NHL) ----------
@@ -474,13 +475,13 @@ def pronostics_jour(chat_id):
                 params={
                     "dateFrom": date_du_jour,
                     "dateTo": date_du_jour,
-                    "competitions": ",".join(COMPETITIONS),
+                    "competitions": ",".join(COMPETITIONS_ID),
                 },
                 timeout=20,
             )
             j = r.json()
             tous = j.get("matches", [])
-            print(f"DEBUG pronostics_jour: code={r.status_code}, cles_reponse={list(j.keys())}, message={j.get('message')}, {len(tous)} matchs bruts, statuts: {[m['status'] for m in tous]}")
+            print(f"DEBUG pronostics_jour: code={r.status_code}, resultSet={j.get('resultSet')}, message={j.get('message')}, {len(tous)} matchs bruts, statuts: {[m['status'] for m in tous]}")
             matchs = [m for m in tous if m["status"] in ("SCHEDULED", "TIMED")]
             break
         except Exception as e:
